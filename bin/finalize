@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# ================================================================
+# bun_buildpack — finalize
+#
+# Validates the pre-bundled application structure.
+# Supports two deployment modes:
+#   1. Pre-bundled: package.json + node_modules/
+#   2. Single-file bundle: package.json + compiled output (no node_modules)
+#
+# Explicitly does NOT run bun install or any package manager command.
+# ================================================================
+set -euo pipefail
+
+BUILD_DIR="$1"
+CACHE_DIR="$2"
+DEPS_DIR="$3"
+DEPS_IDX="$4"
+
+BUILDPACK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+source "${BUILDPACK_DIR}/lib/utils.sh"
+require_python3
+
+# Ensure bun is on PATH from supply phase
+export PATH="${DEPS_DIR}/${DEPS_IDX}/bun/bin:${DEPS_DIR}/${DEPS_IDX}/bin:${PATH}"
+
+log_info "Finalize phase starting"
+log_info "Validating pre-bundled application structure..."
+
+ERRORS=0
+
+# ── Check 1: package.json ───────────────────────────────────────
+
+if [ ! -f "${BUILD_DIR}/package.json" ]; then
+  log_error "package.json not found"
+  ERRORS=$((ERRORS + 1))
+else
+  APP_NAME=$(read_package_field "${BUILD_DIR}/package.json" "name")
+  log_detail "App name: ${APP_NAME:-unknown}"
+fi
+
+# ── Check 2: Determine deployment mode ──────────────────────────
+
+if [ -d "${BUILD_DIR}/node_modules" ]; then
+  # ── Pre-bundled mode ──────────────────────────────────────────
+  log_detail "Mode: pre-bundled (node_modules present)"
+
+  DEP_COUNT=$(find "${BUILD_DIR}/node_modules" -maxdepth 1 -mindepth 1 -type d | wc -l)
+  log_detail "node_modules: ${DEP_COUNT} top-level packages"
+
+  if [ "$DEP_COUNT" -lt 1 ]; then
+    log_error "node_modules exists but appears empty!"
+    ERRORS=$((ERRORS + 1))
+  fi
+
+  # Detect symlinks (Bun's default node_modules is flat; symlinks are unusual)
+  SYMLINK_COUNT=$(find "${BUILD_DIR}/node_modules" -type l 2>/dev/null | wc -l)
+  if [ "$SYMLINK_COUNT" -gt 0 ]; then
+    log_warn "Found ${SYMLINK_COUNT} symlinks in node_modules/"
+    log_warn "Bun creates a flat node_modules by default. Symlinks may indicate"
+    log_warn "the bundle was not created with 'bun install --production'."
+  fi
+
+  # Fix permissions
+  log_info "Setting file permissions..."
+  chmod -R +r "${BUILD_DIR}/node_modules"
+  find "${BUILD_DIR}/node_modules/.bin" -type f -exec chmod +x {} + 2>/dev/null || true
+
+  # Dependency smoke test
+  if [ -f "${BUILD_DIR}/package.json" ]; then
+    FIRST_DEP=$(read_first_dependency "${BUILD_DIR}/package.json")
+
+    if [ -n "$FIRST_DEP" ]; then
+      if bun -e "require.resolve('${FIRST_DEP}', { paths: ['${BUILD_DIR}/node_modules'] })" 2>/dev/null; then
+        log_detail "Dependency smoke test passed (resolved '${FIRST_DEP}')"
+      else
+        log_warn "Could not resolve '${FIRST_DEP}' — node_modules may be incomplete"
+      fi
+    fi
+  fi
+
+  # Start command check (pre-bundled mode — file fallbacks allowed)
+  START_SCRIPT=$(read_package_field "${BUILD_DIR}/package.json" "scripts.start")
+  if [ -n "$START_SCRIPT" ]; then
+    log_detail "Start script: ${START_SCRIPT}"
+  elif [ -f "${BUILD_DIR}/dist/index.js" ]; then
+    log_detail "No start script found; will use dist/index.js"
+  elif [ -f "${BUILD_DIR}/build/server.js" ]; then
+    log_detail "No start script found; will use build/server.js"
+  elif [ -f "${BUILD_DIR}/server.js" ]; then
+    log_detail "No start script found; will use server.js"
+  elif [ -f "${BUILD_DIR}/index.js" ]; then
+    log_detail "No start script found; will use index.js"
+  else
+    log_warn "No start script in package.json and no known entry files found"
+    log_warn "Set 'command' in your mta.yaml parameters"
+  fi
+
+else
+  # ── Single-file bundle mode ──────────────────────────────────
+  log_detail "Mode: single-file bundle (no node_modules)"
+
+  START_SCRIPT=$(read_package_field "${BUILD_DIR}/package.json" "scripts.start")
+  if [ -n "$START_SCRIPT" ]; then
+    log_detail "Start script: ${START_SCRIPT}"
+  else
+    log_warn "No scripts.start found. Ensure 'command' is set in mta.yaml or the app may not start."
+  fi
+fi
+
+# ── Final verdict ───────────────────────────────────────────────
+
+if [ "$ERRORS" -gt 0 ]; then
+  log_error "Validation failed with ${ERRORS} error(s)"
+  log_error ""
+  log_error "Expected workflows:"
+  log_error "  Pre-bundled: bun install --production locally, package node_modules/ into MTAR"
+  log_error "  Single-file: bun build locally, set scripts.start or command in mta.yaml"
+  exit 1
+fi
+
+log_info "Validation passed — application is ready"
+log_info "No bun install executed. Pre-bundled dependencies will be used as-is."

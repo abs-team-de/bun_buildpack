@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# ================================================================
+# bun_buildpack — detect
+#
+# Matches if the app has Bun markers:
+#   1. bun.lockb (Bun < 1.2 binary lockfile)
+#   2. bun.lock  (Bun >= 1.2 text-based lockfile)
+#   3. bunfig.toml (Bun configuration file)
+#   4. engines.bun in package.json
+#
+# Does NOT require node_modules — single-file bundle mode has none.
+# ================================================================
+set -euo pipefail
+
+BUILD_DIR="$1"
+
+BUILDPACK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+source "${BUILDPACK_DIR}/lib/utils.sh"
+require_python3
+
+# Check for Bun-specific files
+if [ -f "${BUILD_DIR}/bun.lockb" ]; then
+  echo "bun"
+  exit 0
+fi
+
+if [ -f "${BUILD_DIR}/bun.lock" ]; then
+  echo "bun"
+  exit 0
+fi
+
+if [ -f "${BUILD_DIR}/bunfig.toml" ]; then
+  echo "bun"
+  exit 0
+fi
+
+# Check for engines.bun in package.json
+if [ -f "${BUILD_DIR}/package.json" ]; then
+  BUN_ENGINE=$(read_package_field "${BUILD_DIR}/package.json" "engines.bun")
+  if [ -n "$BUN_ENGINE" ]; then
+    echo "bun"
+    exit 0
+  fi
+fi
+
+echo "No Bun markers found (bun.lockb, bun.lock, bunfig.toml, or engines.bun in package.json)" >&2
+exit 1

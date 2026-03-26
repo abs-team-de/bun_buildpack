@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# ================================================================
+# bun_buildpack — release
+#
+# Provides default process types to Cloud Foundry.
+# The "command" in mta.yaml takes precedence over this.
+#
+# Two modes:
+#   Pre-bundled (node_modules exists): scripts.start or file fallbacks
+#   Single-file (no node_modules): scripts.start only, no file guessing
+# ================================================================
+
+BUILD_DIR="$1"
+
+BUILDPACK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+source "${BUILDPACK_DIR}/lib/utils.sh"
+require_python3
+
+# Try to extract the start script from package.json
+START_CMD=""
+if [ -f "${BUILD_DIR}/package.json" ]; then
+  START_CMD=$(read_package_field "${BUILD_DIR}/package.json" "scripts.start")
+fi
+
+if [ -n "$START_CMD" ]; then
+  DEFAULT_WEB="$START_CMD"
+elif [ -d "${BUILD_DIR}/node_modules" ]; then
+  # Pre-bundled mode: file fallbacks allowed
+  if [ -f "${BUILD_DIR}/dist/index.js" ]; then
+    DEFAULT_WEB="bun run dist/index.js"
+  elif [ -f "${BUILD_DIR}/build/server.js" ]; then
+    DEFAULT_WEB="bun run build/server.js"
+  elif [ -f "${BUILD_DIR}/server.js" ]; then
+    DEFAULT_WEB="bun run server.js"
+  elif [ -f "${BUILD_DIR}/index.js" ]; then
+    DEFAULT_WEB="bun run index.js"
+  else
+    log_warn "No start command found. Set scripts.start in package.json or command in mta.yaml."
+    # Emit no web process type
+    cat <<EOF
+---
+default_process_types: {}
+EOF
+    exit 0
+  fi
+else
+  # Single-file bundle mode: no file guessing
+  log_warn "No scripts.start found. Set 'command' in mta.yaml."
+  cat <<EOF
+---
+default_process_types: {}
+EOF
+  exit 0
+fi
+
+ESCAPED_WEB=$(python3 -c '
+import json, sys
+print(json.dumps(sys.argv[1]))
+' "$DEFAULT_WEB")
+
+cat <<EOF
+---
+default_process_types:
+  web: ${ESCAPED_WEB}
+EOF
